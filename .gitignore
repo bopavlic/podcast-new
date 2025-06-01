@@ -5,3 +5,6 @@ assets/video
 assets/audio
 
 .env
+client_secret.json
+instagram_session.json
+token.json

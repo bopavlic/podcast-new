@@ -1,0 +1,8 @@
+elevenlabs
+python-dotenv
+google-api-python-client
+google-auth-oauthlib
+google-auth-httplib2
+instagrapi
+moviepy
+openai-whisper

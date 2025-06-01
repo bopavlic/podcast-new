@@ -1,9 +1,198 @@
-# filepath: /Users/borna/Documents/borna_projects/podcast-story/create_subtitle_video.py
-# filepath: create_subtitle_video.py
+# filepath: /Users/borna/Documents/borna_projects/podcast-new/main.py
 from moviepy.editor import (AudioFileClip, ColorClip, CompositeVideoClip,
                             TextClip, VideoFileClip) # VideoFileClip is correctly part of this import
 import whisper # Added import for Whisper
 import os # Already imported below, but good to have at top if used globally
+import time # For potential delays
+from dotenv import load_dotenv
+from elevenlabs.client import ElevenLabs # New import for the main client
+from elevenlabs import Voice, VoiceSettings # Voice and VoiceSettings are often here or under elevenlabs.types
+
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+from instagrapi import Client
+from instagrapi.types import Usertag, Location
+
+# Load environment variables from .env file
+load_dotenv()
+
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "EXAVITQu4vr4xnSDxMaL") # Default voice if not set
+INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME")
+INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD")
+
+# API key for ElevenLabs is now typically passed when initializing the client, so direct set_api_key might not be needed at global scope
+# if ELEVENLABS_API_KEY:
+#     set_api_key(ELEVENLABS_API_KEY) # This might be deprecated or handled by client
+# else:
+#     print("ElevenLabs API key not found. Please set it in your .env file.")
+
+# YouTube specific constants
+CLIENT_SECRETS_FILE = "client_secret.json" # Make sure this file is in the same directory
+SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+API_SERVICE_NAME = "youtube"
+API_VERSION = "v3"
+
+def text_to_speech_elevenlabs(text, output_path="generated_audio.mp3"):
+    """
+    Converts text to speech using ElevenLabs API and saves it to a file.
+    """
+    if not ELEVENLABS_API_KEY:
+        print("Cannot generate audio: ElevenLabs API key is not set.")
+        return False
+    
+    try:
+        # Initialize the ElevenLabs client with your API key
+        client = ElevenLabs(
+            api_key=ELEVENLABS_API_KEY
+        )
+        print(f"Generating audio with ElevenLabs for text: '{text[:50]}...'")
+        
+        # Define voice settings
+        # You can adjust these values as needed
+        voice_settings_obj = VoiceSettings(
+            stability=0.71,
+            similarity_boost=0.5,
+            style=0.0, 
+            use_speaker_boost=True,
+            speed=1.1  # Speed of speech (1.0 is normal speed)
+        )
+
+        # Generate audio using the client's text_to_speech.stream method
+        audio_stream = client.text_to_speech.stream(
+            text=text,
+            voice_id=ELEVENLABS_VOICE_ID,
+            model_id="eleven_multilingual_v2", # Or other models like "eleven_mono_v1", "eleven_turbo_v2"
+            voice_settings=voice_settings_obj
+        )
+
+        # Write the audio stream to a file
+        with open(output_path, "wb") as f:
+            for chunk in audio_stream:
+                if chunk:
+                    f.write(chunk)
+        print(f"Audio successfully saved to {output_path}")
+        return True
+    except Exception as e:
+        print(f"Error generating audio with ElevenLabs: {e}")
+        return False
+
+def get_youtube_credentials():
+    """Gets valid user credentials from storage or runs the OAuth2 flow."""
+    creds = None
+    # The file token.json stores the user's access and refresh tokens, and is
+    # created automatically when the authorization flow completes for the first time.
+    if os.path.exists("token.json"):
+        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+    # If there are no (valid) credentials available, let the user log in.
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            if not os.path.exists(CLIENT_SECRETS_FILE):
+                print(f"ERROR: YouTube client secrets file ('{CLIENT_SECRETS_FILE}') not found.")
+                print("Please download it from Google Cloud Console and place it in the script's directory.")
+                return None
+            flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRETS_FILE, SCOPES)
+            creds = flow.run_local_server(port=0)
+        # Save the credentials for the next run
+        with open("token.json", "w") as token:
+            token.write(creds.to_json())
+    return creds
+
+def upload_to_youtube(video_path, title, description, tags, privacy_status="public", made_for_kids=False):
+    """Uploads a video to YouTube."""
+    try:
+        print(f"Attempting to upload '{video_path}' to YouTube...")
+        credentials = get_youtube_credentials()
+        if not credentials:
+            print("Could not get YouTube credentials. Skipping upload.")
+            return False
+
+        youtube = build(API_SERVICE_NAME, API_VERSION, credentials=credentials)
+
+        body = {
+            "snippet": {
+                "title": title,
+                "description": description,
+                "tags": tags,
+                "categoryId": "22"  # People & Blogs. Check YouTube API for other category IDs.
+            },
+            "status": {
+                "privacyStatus": privacy_status,
+                "madeForKids": made_for_kids,
+                "selfDeclaredMadeForKids": made_for_kids
+            }
+        }
+
+        media = MediaFileUpload(video_path, chunksize=-1, resumable=True)
+        
+        request = youtube.videos().insert(
+            part=",".join(body.keys()),
+            body=body,
+            media_body=media
+        )
+        
+        response = None
+        while response is None:
+            status, response = request.next_chunk()
+            if status:
+                print(f"Uploaded {int(status.progress() * 100)}%")
+        
+        print(f"YouTube upload successful! Video ID: {response.get('id')}")
+        print(f"Watch it here: https://www.youtube.com/watch?v={response.get('id')}")
+        return True
+    except Exception as e:
+        print(f"An error occurred during YouTube upload: {e}")
+        return False
+
+def upload_to_instagram_reel(video_path, caption, first_comment=""):
+    """Uploads a video to Instagram as a Reel."""
+    if not INSTAGRAM_USERNAME or not INSTAGRAM_PASSWORD:
+        print("Instagram username or password not found in .env file. Skipping Instagram upload.")
+        return False
+
+    cl = Client()
+    try:
+        print("Attempting to log in to Instagram...")
+        # Check for session file
+        session_file = "instagram_session.json"
+        if os.path.exists(session_file):
+            cl.load_settings(session_file)
+            cl.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD) # Verifies session
+            print("Instagram session loaded from file.")
+        else:
+            cl.login(INSTAGRAM_USERNAME, INSTAGRAM_PASSWORD)
+            cl.dump_settings(session_file) # Save session for next time
+            print("Logged in to Instagram and session saved.")
+
+        print(f"Uploading '{video_path}' to Instagram Reels...")
+        media = cl.video_upload(
+            path=video_path,
+            caption=caption,
+            # For Reels, it's usually uploaded as a standard video post that appears in the Reels tab.
+            # The differentiation is often by aspect ratio and content style.
+            # To explicitly make it a reel, you might need to use a different endpoint if available
+            # or ensure it's treated as such by Instagram's backend.
+            # The `upload_video` method with a 9:16 aspect ratio video is standard for Reels.
+            # Adding usertags or location if needed:
+            # usertags=[Usertag(user=cl.user_info_by_username("someuser"), x=0.5, y=0.5)],
+            # location=Location(name="Some Place", lat=40.7128, lng=-74.0060)
+        )
+        print(f"Instagram Reel upload successful! Media ID: {media.id}")
+        if first_comment:
+            cl.media_comment(media.id, first_comment)
+            print(f"Added first comment: {first_comment}")
+        return True
+    except Exception as e:
+        print(f"An error occurred during Instagram upload: {e}")
+        if "login_required" in str(e).lower() and os.path.exists(session_file):
+            print("Instagram login session might be invalid. Deleting session file and try again.")
+            os.remove(session_file)
+        return False
 
 def transcribe_audio_to_segments(audio_path):
     """
@@ -200,18 +389,46 @@ def create_styled_subtitle_video(audio_path, segments, output_path="output_video
 
 
 if __name__ == '__main__':
-    # --- Step 1: Configure paths ---
-    your_audio_file = "assets/audio/coffee_war.mp3"  # IMPORTANT: Path to your audio
-    # Optional: Path to your background video (e.g., Minecraft gameplay)
-    your_background_video = "assets/video/minecraft_gameplay.mp4" # IMPORTANT: Path to your background video or None
-    output_video_file = "output/final_short_video.mp4" # Path for the generated video
+    # --- Step 0: Get story from user ---
+    print("Please paste your story below. Press Ctrl+D (Unix) or Ctrl+Z then Enter (Windows) when done:")
+    story_lines = []
+    while True:
+        try:
+            line = input()
+            story_lines.append(line)
+        except EOFError:
+            break
+    story_text = "\\n".join(story_lines)
 
-    # Create output directory if it doesn't exist
-    # import os # Moved to top
+    if not story_text.strip():
+        print("No story text provided. Exiting.")
+        exit()
+    
+    video_title = story_text.split('.')[0] # Use first sentence as title, or part of it
+    if len(video_title) > 80 : video_title = video_title[:80] + "..."
+    video_description_youtube = f"AI Generated Story: {video_title}\\n\\n{story_text[:200]}..."
+    video_caption_instagram = f"{video_title} #AIStory #ShortStory #ReelContent"
+    hashtags_youtube = ["AIStory", "ShortStory", "AutomatedVideo", "TextToSpeech"]
+
+
+    # --- Step 1: Configure paths ---
+    base_filename = "".join(filter(str.isalnum, video_title.lower().replace(" ", "_")))[:30]
+    generated_audio_file = f"assets/audio/{base_filename}_audio.mp3"
+    your_background_video = "assets/video/minecraft_gameplay.mp4" 
+    output_video_file = f"output/{base_filename}_final_video.mp4"
+
+    # Create output directories if they don't exist
     os.makedirs("output", exist_ok=True)
-    os.makedirs("assets/audio", exist_ok=True) # Ensure assets/audio also exists
+    os.makedirs("assets/audio", exist_ok=True)
     os.makedirs("assets/video", exist_ok=True)
 
+    # --- Step 1b: Generate Audio from Text ---
+    print("\\n--- Generating Audio ---")
+    if not text_to_speech_elevenlabs(story_text, generated_audio_file):
+        print("Failed to generate audio. Exiting.")
+        exit()
+    
+    your_audio_file = generated_audio_file # Use the newly generated audio
 
     # Check if the audio/video paths exist
     if not os.path.exists(your_audio_file):
@@ -252,3 +469,28 @@ if __name__ == '__main__':
         output_path=output_video_file,
         background_video_path=your_background_video
     )
+
+    if not os.path.exists(output_video_file):
+        print(f"Video generation failed or file not found at {output_video_file}. Skipping uploads.")
+        exit()
+        
+    # --- Step 4: Upload to YouTube ---
+    print("\\n--- Uploading to YouTube ---")
+    upload_to_youtube(
+        output_video_file,
+        title=video_title,
+        description=video_description_youtube,
+        tags=hashtags_youtube,
+        privacy_status="public",
+        made_for_kids=False
+    )
+
+    # --- Step 5: Upload to Instagram ---
+    print("\\n--- Uploading to Instagram ---")
+    upload_to_instagram_reel(
+        output_video_file,
+        caption=video_caption_instagram,
+        first_comment=f"What do you think of this? #story #Storytelling"
+    )
+
+    print("\\n--- Script Finished ---")
