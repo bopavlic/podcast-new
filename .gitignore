@@ -1,0 +1,7 @@
+assets
+output
+
+assets/video
+assets/audio
+
+.env
