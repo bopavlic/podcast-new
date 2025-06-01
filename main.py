@@ -177,7 +177,7 @@ def create_styled_subtitle_video(audio_path, segments, output_path="output_video
     try:
         final_video_clip.write_videofile(
             output_path,
-            fps=30,
+            fps=60,
             codec='libx264',
             audio_codec='aac',
             threads=4 # Use multiple threads for faster processing if available
